@@ -68,7 +68,8 @@ jobs:
         DEBIAN_FRONTEND: noninteractive
       run: |
         sudo apt-get update -y
-        sudo apt-get install -y libasound2-dev libavcodec-dev libavformat-dev libcups2-dev libgl1-mesa-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgtk2.0-dev libgtk-3-dev libudev-dev libxrandr-dev libxslt1-dev libxtst-dev libxxf86vm-dev x11proto-xf86vidmode-dev
+        sudo apt-get install gcc-11 g++-11 libxrandr-dev libxtst-dev libcups2-dev libasound2-dev 
+        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 100 --slave /usr/bin/g++ g++ /usr/bin/g++-11
         sudo apt-get clean -y
 
     - name: Prepare JCEF
