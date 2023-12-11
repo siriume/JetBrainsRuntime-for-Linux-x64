@@ -1,0 +1,126 @@
+name: jbr-linux-x64
+
+on:
+  schedule:
+    - cron:  '30 0 1 * *'
+  workflow_dispatch:
+    inputs:
+      release_id:
+        required: true
+        default: 'latest'
+        type: string
+        description: "Release id or tag"
+      jbr_branch:
+        required: false
+        type: string
+        description: "JBR branch"
+
+jobs:
+  build:
+    runs-on: ubuntu-18.04
+    steps:
+    - name: Clone Repository
+      uses: actions/checkout@v3
+
+    - name: Generate Variables
+      id: vars
+      run: |
+        release_id='${{ github.event.inputs.release_id }}'
+        curl -H "authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -sfL -m 60 -o /tmp/latest.json "${{ github.api_url }}/repos/JetBrains/JetBrainsRuntime/releases/${release_id:-latest}"
+
+        release_name=$(jq -r .name /tmp/latest.json)
+        echo "Release: $release_name"
+        echo ::set-output name=release_name::"$release_name"
+
+        html_url=$(jq -r .html_url /tmp/latest.json)
+        echo "Release URL: $html_url"
+        echo ::set-output name=release_body::"$html_url"
+
+        tag_name=$(jq -r .tag_name /tmp/latest.json)
+        echo "Tag: $tag_name"
+        echo ::set-output name=tag_name::"$tag_name"
+
+        if [[ "$tag_name" == jbr17* ]]; then
+          JBSDK_VERSION=$(sed -E 's/^jbr([0-9_.]+)b.*$/\1/' <<< "$tag_name")
+          build_number=$(sed -E 's/^jbr[0-9_.]+b([0-9.]+)$/\1/' <<< "$tag_name")
+        elif [[ "$tag_name" == jbr-release-17.* ]]; then
+          JBSDK_VERSION=$(sed -E 's/^jbr-release-([0-9_.]+)b.*$/\1/' <<< "$tag_name")
+          build_number=$(sed -E 's/^jbr-release-[0-9_.]+b([0-9.]+)$/\1/' <<< "$tag_name")
+        else
+          echo unknown tag name: $tag_name
+          exit 1
+        fi
+
+        echo "JBSDK Version: $JBSDK_VERSION"
+        echo ::set-output name=JBSDK_VERSION::"$JBSDK_VERSION"
+        echo "Build Number: $build_number"
+        echo ::set-output name=build_number::"$build_number"
+
+        ref='${{ github.event.inputs.jbr_branch }}'
+        if [[ -z "$ref" ]]; then
+          ref="jb${JBSDK_VERSION}-b${build_number}"
+        fi
+        echo "Ref: $ref"
+        echo ::set-output name=ref::"$ref"
+
+    - name: Init Build Dependencies
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo apt-get update -y
+        sudo apt-get install -y libasound2-dev libavcodec-dev libavformat-dev libcups2-dev libgl1-mesa-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgtk2.0-dev libgtk-3-dev libudev-dev libxrandr-dev libxslt1-dev libxtst-dev libxxf86vm-dev x11proto-xf86vidmode-dev
+        sudo apt-get clean -y
+
+    - name: Prepare JCEF
+      run: |
+        aria2c -o jbrsdk_jcef.tgz 'https://cache-redirector.jetbrains.com/intellij-jbr/jbrsdk_jcef-${{ steps.vars.outputs.JBSDK_VERSION }}-linux-x64-b${{ steps.vars.outputs.build_number }}.tar.gz'
+        mkdir jcef_linux_x64
+        tar -zxvf jbrsdk_jcef.tgz --strip-components=1 -C jcef_linux_x64 --wildcards -- 'jbrsdk_jcef-*/jmods/gluegen.rt.jmod' 'jbrsdk_jcef-*/jmods/jogl.all.jmod' 'jbrsdk_jcef-*/jmods/jcef.jmod'
+        rm -f jbrsdk_jcef.tgz
+
+    - name: Clone JBR Repository
+      uses: actions/checkout@v3
+      with:
+        repository: JetBrains/JetBrainsRuntime
+        ref: ${{ steps.vars.outputs.ref }}
+        fetch-depth: 0 # 这里必须拉取全部历史，下面的mkimages_x64.sh里面会通过git log找tag
+        path: JetBrainsRuntime
+
+    - name: Patch & Compile JetBrainsRuntime with JCEF
+      id: compile
+      run: |
+        cd JetBrainsRuntime
+        git log -1
+
+        patch -p1 < ../idea.patch
+
+        mv ../jcef_linux_x64 ./
+
+        export BOOT_JDK="$JAVA_HOME_17_X64"
+
+        jb/project/tools/linux/scripts/mkimages_x64.sh '${{ steps.vars.outputs.build_number }}' jcef
+
+        echo ::set-output name=jbr_image::"$(ls -1 jbr_jcef-*-linux-x64-*.tar.gz)"
+
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.vars.outputs.tag_name }}
+        release_name:  ${{ steps.vars.outputs.release_name }}
+        body: ${{ steps.vars.outputs.release_body }}
+        draft: false
+        prerelease: true
+
+    - name: Upload Release Asset
+      id: upload-release-asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: JetBrainsRuntime/${{ steps.compile.outputs.jbr_image }}
+        asset_name: ${{ steps.compile.outputs.jbr_image }}
+        asset_content_type: application/gzip
